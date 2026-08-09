@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bank-of-anthos
+  labels:
+    purpose: application-workloads
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform
+  labels:
+    purpose: platform-tooling
