@@ -1,0 +1,205 @@
+# Incident Postmortems
+
+All incidents below occurred during development/operation of this lab
+platform, not against real production traffic or real customers. Impact is
+scoped accordingly — "impact" below means "blocked project progress," not
+"caused a customer-facing outage."
+
+---
+
+### PM-1: ArgoCD ApplicationSet Controller Silent Crash Loop
+
+**Detection**: `argocd-applicationset-controller` showed 880 accumulated
+restarts, cycling roughly every 2 minutes.
+**Root cause**: `kubectl logs <pod> --previous` (the `--previous` flag was
+essential — the fresh restart's own logs were near-empty) revealed
+`no matches for kind "ApplicationSet"` — the CRD itself was missing from
+the cluster, likely dropped during a prior rebuild whose ArgoCD manifest
+didn't include it.
+**Resolution**: Applied the CRD directly
+(`kubectl apply -f applicationset-crd.yaml --server-side --force-conflicts`),
+deleted the pod to force immediate retry. Confirmed stable at 0 restarts.
+**Prevention**: Rebuild runbook now explicitly verifies
+`kubectl get crd | grep -i applicationset` after every ArgoCD install.
+
+### PM-2: DaemonSet Pods Permanently Pending Despite Cluster-Wide Headroom
+
+**Detection**: 2 of 9 `node-exporter` pods stuck `Pending` after
+installing `kube-prometheus-stack`; scaling the node group further did
+**not** fix it.
+**Root cause**: DaemonSet pods bind via `nodeAffinity` to one specific
+node at creation. The two stuck pods were bound to nodes already at
+`t3.small`'s 11-pod ENI ceiling — an AWS networking limit, not a
+Kubernetes setting, and not fixable by adding capacity elsewhere.
+**Resolution**: Cordon + drain each full node one at a time, letting
+existing pods reschedule elsewhere and freeing a slot, then uncordon. No
+data loss — Vault (dev-mode, stateless-equivalent) and ArgoCD controllers
+(stateless reconcilers) rescheduled cleanly.
+**Prevention**: Check `nodeAffinity` and the bound node's real pod count
+before reaching for node-group scaling as the first move.
+
+### PM-3: Storage-Backed Pods Stuck Pending — Missing EBS CSI Driver
+
+**Detection**: `tempo-0`, `loki-0`, and Loki's cache pods all `Pending`
+simultaneously.
+**Root cause**: EKS does not install the EBS CSI driver by default; it had
+never been added to this cluster.
+**Resolution**: Registered the OIDC thumbprint, created an IAM role
+trusted by the driver's service account, attached
+`AmazonEBSCSIDriverPolicy`, installed as an EKS managed add-on. PVCs
+bound within minutes.
+**Prevention**: Rebuild order now installs the EBS CSI add-on before any
+PVC-backed workload (see runbook step 9).
+
+### PM-4: `userservice` Pods CrashLooping — JWT Secret Key/Filename Mismatch
+
+**Detection**: A fresh Rollout created 2 pods, both crashing immediately.
+**Root cause**: The JWT secret's real key names
+(`jwtRS256.key`/`jwtRS256.key.pub`) need an `items` remap in the volume
+mount to the filenames the app actually expects on disk
+(`privatekey`/`publickey`). This remap was dropped when the Rollout
+manifest was rewritten from the original Deployment.
+**Resolution**: Re-added the `items` remap block, validated with `grep`
+before pushing, applied, forced an ArgoCD sync.
+**Prevention**: Diff volume mounts specifically against the last
+known-working manifest when rewriting from scratch — this class of drop
+does not fail loudly at `kubectl apply` time, only at container start.
+
+### PM-5: Secret-Scanner False-Positive Storm on a Fork
+
+**Detection**: Gitleaks with `fetch-depth: 0` returned 60 "leaks."
+**Root cause**: Years of dummy/demo credentials baked into Bank of
+Anthos's own upstream manifests going back to 2019 — inherited history,
+not anything this project wrote, and not live secrets.
+**Resolution**: Scoped Gitleaks to `--no-git --source=<owned-path>` —
+current files in the owned service folder only.
+**Prevention**: Never rewrite upstream git history in a fork; audit what
+you add, not an inherited project's entire history.
+
+### PM-6a: `kubectl apply` Failing on Large CRDs (Annotation Size Limit)
+
+**Detection**: Applying ArgoCD's ApplicationSet CRD via plain
+`kubectl apply -f` failed outright.
+**Root cause**: `kubectl apply` stores the full config in an annotation
+for diffing; this specific CRD exceeds Kubernetes' 262KB annotation
+limit.
+**Resolution**: `kubectl apply -f <file> --server-side --force-conflicts`.
+
+### PM-6b: Helm "Phantom" Failed Release Blocking Reinstall
+
+**Detection**: `helm install` refused to proceed, citing an existing
+release with no actual pods running.
+**Root cause**: An earlier failed install (a transient DNS/network
+timeout mid-install) left a stale release record in Helm's own tracking
+state.
+**Resolution**: `helm uninstall ... --no-hooks` to clear the stale record
+first, then a clean install.
+**Prevention**: Check `helm list -n <namespace> -a` before assuming a
+clean slate.
+
+### PM-6c: Loki Chart Requires an Explicit Schema Flag
+
+**Detection**: `helm install loki ...` failed:
+`You must provide a schema_config for Loki`.
+**Root cause**: The installed chart version requires an explicit storage
+schema; the chart's own error message names the exact fix for lab/testing
+use.
+**Resolution**: Added `--set loki.useTestSchema=true` to the install
+command.
+
+### PM-7: Terraform-Managed Nodegroup Rejects `t3.medium`
+
+**Detection**: `terraform apply` on the node group failed:
+`InvalidParameterCombination — The specified instance type is not
+eligible for Free Tier`.
+**Root cause**: This AWS account's Free Plan blocks non-Free-Tier
+instance types at the API level, independent of credit balance.
+**Resolution**: Reverted to `t3.small`, solved subsequent capacity issues
+via horizontal scaling instead (see ADR-003, ADR-005 for the one
+exception).
+
+### PM-8: OpenTelemetry Collector CrashLooping / Pending — Multiple Causes
+
+**Detection**: `otel-collector` DaemonSet pods showed a mix of `Pending`
+and `CrashLoopBackOff`.
+**Root cause, layered**: (1) the chart now requires an explicit
+`image.repository` value — install failed outright without it; (2) once
+that was fixed, remaining pod-count-ceiling pressure (same class of issue
+as PM-2) caused some pods to stay `Pending` until the node group was
+scaled; (3) the `loki` exporter type was renamed `otlp_http` upstream in
+the chart version in use — the chart's deprecation notice auto-rewrote
+this at install time, but it was worth confirming was not the crash
+cause via `kubectl logs --previous` before assuming it was fixed.
+**Resolution**: `--set image.repository=otel/opentelemetry-collector-k8s`,
+node scaling, and confirming the exporter auto-rewrite via install output.
+
+### PM-9: AWS VPC CNI Does Not Enforce NetworkPolicy by Default
+
+**Detection**: A live security test (see
+`docs/security/security-controls.md`, Round 1 Test 2) found a pod in an
+unrelated namespace could reach `userservice` despite a default-deny
+`NetworkPolicy` object existing in the cluster.
+**Root cause**: AWS VPC CNI (`aws-node`) does not enforce
+`NetworkPolicy` objects without an explicit opt-in — the policy existing
+as a Kubernetes object is necessary but not sufficient.
+**Resolution**: `kubectl set env daemonset aws-node -n kube-system
+ENABLE_NETWORK_POLICY=true`, waited for rollout, **re-tested and
+confirmed the fix**: the identical cross-namespace request that
+previously leaked now failed with `Connection reset by peer`.
+**Prevention**: Never assume a `NetworkPolicy` object being present means
+it is being enforced on EKS — verify the CNI's actual enforcement
+capability and configuration.
+
+### PM-10: mTLS Traffic-Level Telemetry Not Present at Test Time
+
+**Detection**: `count(istio_requests_total)` returned an empty result set
+in Prometheus, even after a properly-waited port-forward.
+**Root cause**: not fully diagnosed — the metric was simply absent from
+Prometheus's scraped data at the time of testing. `PeerAuthentication:
+STRICT` is independently confirmed present via `kubectl get`, but the
+live-traffic evidence that would prove mTLS is actually being applied to
+real requests was not obtainable in this session.
+**Status**: open, documented in technical debt, not silently dropped.
+
+### PM-11: Circuit Breaker / Outlier Detection Never Observed Firing
+
+**Detection**: 50 rapid real requests against `userservice` all returned
+`200`; no outlier-detection ejection stats appeared in the sidecar's stat
+dump.
+**Root cause**: no failure condition was ever actually created — Istio's
+outlier detection requires real 5xx responses to trigger, and none
+occurred during any load test run in this project.
+**Status**: configuration confirmed present and correct; functional
+behavior under real failure remains unverified. A real test would require
+combining Istio fault injection (configured to return 5xx) with
+simultaneous load generation — not attempted in this build.
+
+### PM-12: Load-Testing Tooling Failures Before a Valid Result Was Obtained
+
+**Detection**: (1) a `hey` binary download from a third-party S3 URL
+returned an XML error page instead of the binary, causing bash to attempt
+to execute XML as a script; (2) the first `ab` attempt raced a
+`kubectl port-forward` that had not yet finished establishing, producing
+a false `Connection refused` baseline.
+**Resolution**: (1) switched to `apache2-utils` (`ab`) from Ubuntu's own
+package repo, avoiding third-party binary downloads entirely; (2) waited
+explicitly for `Forwarding from` in the port-forward's log before sending
+any traffic.
+**Prevention**: never trust a `sleep N` as proof a port-forward is ready
+— poll the actual log output for confirmation.
+
+### PM-13: WSL2 DNS Resolver Breaks Recurring Across Sessions
+
+**Detection**: total DNS resolution failure at session start
+(`172.18.240.1:53: server misbehaving`), blocking every AWS endpoint —
+not GitHub-Pages-specific like PM-9's cousin issue, a complete resolver
+failure.
+**Root cause**: WSL2's auto-generated `/etc/resolv.conf` is unreliable in
+this environment and has reset itself more than once even after being
+"permanently" fixed and locked (`chattr +i`) in a prior session.
+**Resolution**: `generateResolvConf = false` in `/etc/wsl.conf`, manually
+set `/etc/resolv.conf` to public DNS (`8.8.8.8`, `1.1.1.1`), locked the
+file, and required a `wsl --shutdown` from the Windows side for the
+`wsl.conf` change to actually take effect.
+**Prevention**: check this proactively at the start of every single
+session (see runbook section 0) — do not wait for it to break again.
