@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: patroni-credentials
+  namespace: bank-of-anthos
+type: Opaque
+stringData:
+  superuser-password: "SuperSecretPass123"
+  replication-password: "ReplicaPass123"
+  app-db-password: "accounts-pwd"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: patroni-config
+  namespace: bank-of-anthos
+data:
+  SCOPE: "accounts-db"
+  PGVERSION: "16"
+  ETCD_HOSTS: '"etcd-0.etcd:2379","etcd-1.etcd:2379","etcd-2.etcd:2379"'
+  ALLOW_NOSSL: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: patroni
+  namespace: bank-of-anthos
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: patroni
+  ports:
+    - name: patroni-api
+      port: 8008
+    - name: postgres
+      port: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: patroni-primary
+  namespace: bank-of-anthos
+spec:
+  selector:
+    app: patroni
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: patroni
+  namespace: bank-of-anthos
+spec:
+  serviceName: patroni
+  replicas: 3
+  selector:
+    matchLabels:
+      app: patroni
+  template:
+    metadata:
+      labels:
+        app: patroni
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      containers:
+        - name: patroni
+          image: ghcr.io/zalando/spilo-16:3.3-p1
+          ports:
+            - containerPort: 8008
+              name: patroni-api
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - configMapRef:
+                name: patroni-config
+          env:
+            - name: PGPASSWORD_SUPERUSER
+              valueFrom:
+                secretKeyRef:
+                  name: patroni-credentials
+                  key: superuser-password
+            - name: PGPASSWORD_STANDBY
+              valueFrom:
+                secretKeyRef:
+                  name: patroni-credentials
+                  key: replication-password
+            - name: KUBERNETES_NAMESPACE
+              value: bank-of-anthos
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /primary
+              port: 8008
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: 8008
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: pgdata
+              mountPath: /home/postgres/pgdata
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: accounts-db-config
+  namespace: bank-of-anthos
+data:
+  ACCOUNTS_DB_URI: postgresql://accounts-admin:accounts-pwd@patroni-primary:5432/accounts-db

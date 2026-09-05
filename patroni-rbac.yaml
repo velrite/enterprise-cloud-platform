@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: patroni
+  namespace: bank-of-anthos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: patroni-role
+  namespace: bank-of-anthos
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "create", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "patch", "update", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: patroni-rolebinding
+  namespace: bank-of-anthos
+subjects:
+  - kind: ServiceAccount
+    name: patroni
+    namespace: bank-of-anthos
+roleRef:
+  kind: Role
+  name: patroni-role
+  apiGroup: rbac.authorization.k8s.io
