@@ -8,6 +8,10 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+  ingress:
+    # allow traffic from other pods in this same namespace (needed for etcd/Patroni/Redis Sentinel peer traffic, and userservice serving requests)
+    - from:
+        - podSelector: {}
   egress:
     # DNS — every pod needs this to resolve any in-cluster name at all
     - to:
@@ -19,8 +23,11 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Istio control plane — sidecars need this for certs (15012), XDS config, telemetry
+    # Istio control plane — sidecars need this for certs, XDS config, telemetry
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: istio-system
+    # same-namespace peer traffic — etcd raft, Patroni replication, Redis Sentinel gossip, userservice -> accounts-db
+    - to:
+        - podSelector: {}
