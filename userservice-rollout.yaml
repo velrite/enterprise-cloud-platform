@@ -1,0 +1,87 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: userservice
+  namespace: bank-of-anthos
+spec:
+  replicas: 2
+  strategy:
+    canary:
+      steps:
+        - setWeight: 25
+        - pause: { duration: 30s }
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - setWeight: 100
+  selector:
+    matchLabels:
+      app: userservice
+  template:
+    metadata:
+      labels:
+        app: userservice
+    spec:
+      serviceAccountName: bank-of-anthos
+      containers:
+        - name: userservice
+          image: ghcr.io/velrite/bank-of-anthos-userservice:2821d02ca8d16770111a17a5284211fdcab41434
+          ports:
+            - containerPort: 8080
+          env:
+            - name: VERSION
+              value: "v0.6.5"
+            - name: PORT
+              value: "8080"
+            - name: TOKEN_EXPIRY_SECONDS
+              value: "3600"
+            - name: PRIV_KEY_PATH
+              value: "/tmp/.ssh/privatekey"
+            - name: PUB_KEY_PATH
+              value: "/tmp/.ssh/publickey"
+          envFrom:
+            - configMapRef:
+                name: environment-config
+            - configMapRef:
+                name: accounts-db-config
+          volumeMounts:
+            - name: keys
+              mountPath: /tmp/.ssh
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthy
+              port: 8080
+            initialDelaySeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: keys
+          secret:
+            secretName: jwt-secret
+            items:
+              - key: jwtRS256.key
+                path: privatekey
+              - key: jwtRS256.key.pub
+                path: publickey
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: userservice
+  namespace: bank-of-anthos
+spec:
+  selector:
+    app: userservice
+  ports:
+    - port: 8080
+      targetPort: 8080

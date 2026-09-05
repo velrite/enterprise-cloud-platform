@@ -9,6 +9,7 @@ spec:
     - Ingress
     - Egress
   egress:
+    # DNS — every pod needs this to resolve any in-cluster name at all
     - to:
         - namespaceSelector:
             matchLabels:
@@ -18,3 +19,8 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Istio control plane — sidecars need this for certs (15012), XDS config, telemetry
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
