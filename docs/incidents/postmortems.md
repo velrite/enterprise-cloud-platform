@@ -271,3 +271,38 @@ any new default-deny policy, not just security isolation, since a fully
 strict deny breaks normal cluster operation (DNS, and by extension
 Istio's control-plane cert issuance) just as effectively as it blocks
 attackers.
+
+### PM-16: Default-Deny NetworkPolicy Blocked Same-Namespace Peer Traffic, Breaking etcd Quorum
+**Date**: 2026-09-05
+**Detection**: A 3-node etcd StatefulSet reached `Running` status on all
+pods, but `etcdctl endpoint health` and `member list` both timed out.
+Pod logs showed repeated failed raft pre-vote rounds and `503`/`i/o
+timeout` errors when nodes attempted to reach each other on peer port
+2380 (e.g. `etcd-0` failing to reach `etcd-1.etcd:2380`).
+**Root cause**: The `default-deny-all` NetworkPolicy (already patched
+once for DNS in PM-15, and again for istio-system egress) still had no
+rule allowing pods to reach OTHER PODS within the same `bank-of-anthos`
+namespace. This is fine for a purely client-server app like `userservice`
+(which only calls outward to DNS, the mesh control plane, and the DB),
+but etcd's raft protocol requires direct peer-to-peer traffic between
+its own members — same-namespace pod-to-pod communication that was never
+explicitly allowed.
+**Resolution**: Added a general same-namespace `ingress`/`egress` rule
+(`podSelector: {}` with no namespace restriction) permitting any pod in
+`bank-of-anthos` to reach any other pod in the same namespace, while
+leaving all cross-namespace ingress/egress denied by default except the
+existing DNS and istio-system exceptions. Re-verified cross-namespace
+isolation was still intact after the change (a pod in `default` namespace
+still could not reach `userservice`).
+**Prevention**: A default-deny NetworkPolicy's required exceptions
+depend entirely on the workload types sharing that namespace, not just
+on the app you tested it against first. Any namespace that will host a
+distributed/clustered system (etcd, Patroni, Redis Sentinel, Kafka,
+etc.) needs a same-namespace peer-traffic allow rule from the start —
+a policy that passed testing against a single stateless app is not
+proof it will work for a peer-to-peer system added later. This is the
+third NetworkPolicy-related gap found this session (PM-15: DNS,
+istio-system; PM-16: same-namespace peers) — worth testing ALL
+communication patterns a namespace will ever need, not just the first
+workload deployed into it, before considering a default-deny policy
+"done."
