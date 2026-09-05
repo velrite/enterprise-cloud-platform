@@ -203,3 +203,43 @@ file, and required a `wsl --shutdown` from the Windows side for the
 `wsl.conf` change to actually take effect.
 **Prevention**: check this proactively at the start of every single
 session (see runbook section 0) — do not wait for it to break again.
+
+### PM-14: AWS Free Plan Exhaustion — Environment Change for Phase 3
+**Date**: 2026-09-05
+**Severity**: Medium (project-continuity impact, not a technical failure)
+**Detection**: AWS sent an account notice that Free Plan credits were
+fully consumed on account 681117450689, requiring a switch to standard
+pay-as-you-go billing (a valid payment method) to continue provisioning
+paid resources. No policy violation, no unpaid balance — a normal Free
+Plan credit ceiling being reached.
+**Root cause**: Phases 1–2 were built and repeatedly rebuilt live against
+a real EKS cluster (t3.small nodes, NAT Gateway, EBS volumes,
+load-balanced Istio ingress) across many working sessions. Real
+infrastructure carries a real running cost; the starting credit was
+consumed by legitimate, documented usage, not waste — see
+`docs/operations/cost-analysis.md` for the Phase 1–2 spend breakdown.
+**Resolution**: No further paid AWS resources are available for this
+project at this time. Phase 3 (Resilience, Chaos Engineering & Disaster
+Recovery) is built instead on GitHub Codespaces, running a local-style
+Kubernetes cluster (`kind`) inside the Codespace container — zero
+additional cloud cost, real multi-node Kubernetes, real
+pod/network/disk chaos injection, real Patroni/Redis Sentinel/etcd
+failover.
+**What changes, explicitly**:
+| Capability | Phase 1–2 (AWS/EKS) | Phase 3 (Codespaces/kind) |
+|---|---|---|
+| Compute | Real EC2 t3.small nodes | Docker containers acting as nodes, on GitHub's shared compute |
+| Storage | EBS CSI driver, real PVs | `kind`'s local-path-provisioner |
+| Networking | Real VPC, real AZs | Single-host Docker networking (no real AZ/region separation) |
+| "Region failure" chaos test | Not attempted in Ph1/2 | Simulated as full node-group loss — explicitly a simulation, not a real multi-region test |
+| Cost data | Real AWS Cost Explorer numbers | No real bill exists on Codespaces — Phase 5 will use Ph1/2's historical export instead |
+**Prevention**:
+1. Set an AWS Budget alert *before* the first dollar of credit is spent,
+   not after — this was never done in Phase 1–2.
+2. If AWS access is restored for a future phase, tear down (`terraform
+   destroy` in `network`/`cluster`, never `bootstrap`) at the end of
+   every session without exception, not "most" sessions.
+3. Phase 5 (FinOps) will use Phase 1–2's real historical Cost Explorer
+   export as its actual data source — Codespaces has no billing signal
+   to analyze, so tooling (Kubecost/OpenCost) run there is a
+   demonstration only, not the source of findings.
