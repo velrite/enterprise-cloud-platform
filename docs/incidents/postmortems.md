@@ -243,3 +243,31 @@ failover.
    export as its actual data source — Codespaces has no billing signal
    to analyze, so tooling (Kubecost/OpenCost) run there is a
    demonstration only, not the source of findings.
+
+### PM-15: Default-Deny NetworkPolicy Blocked DNS, Breaking Istio Sidecar Certs
+**Date**: 2026-09-05
+**Detection**: `userservice` pods stuck at `1/2 Ready` indefinitely after
+deploying to the Codespaces/kind cluster. `istio-proxy` sidecar logs
+showed repeated `i/o timeout` errors resolving `istiod.istio-system.svc`
+via CoreDNS (`10.96.0.10:53`), preventing the sidecar from obtaining its
+workload certificate.
+**Root cause**: The baseline `default-deny-all` NetworkPolicy
+(`podSelector: {}`, `policyTypes: [Ingress, Egress]`) had zero egress
+rules — a fully strict deny with no exceptions. This blocked ALL egress
+including DNS lookups (port 53), which every pod needs even to resolve
+in-cluster service names like `istiod.istio-system.svc`. Confirmed via
+direct test: deleting the policy immediately restored DNS resolution and
+pod readiness; re-adding a corrected version with an explicit DNS-allow
+egress rule to `kube-system` on UDP/TCP 53 restored both readiness AND
+re-confirmed cross-namespace traffic was still blocked (security posture
+intact).
+**Resolution**: Added an explicit `egress` rule to `default-deny-all`
+permitting only DNS traffic (UDP/TCP 53) to the `kube-system` namespace,
+leaving all other egress and all ingress denied by default.
+**Prevention**: Any default-deny NetworkPolicy in a real environment
+needs a paired DNS-allow rule from day one — this is a well-known but
+easy-to-forget pairing. Test pod readiness immediately after applying
+any new default-deny policy, not just security isolation, since a fully
+strict deny breaks normal cluster operation (DNS, and by extension
+Istio's control-plane cert issuance) just as effectively as it blocks
+attackers.
