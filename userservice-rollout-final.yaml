@@ -1,0 +1,59 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: userservice
+  namespace: bank-of-anthos
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: userservice
+  template:
+    metadata:
+      labels:
+        app: userservice
+      annotations:
+        sidecar.istio.io/rewriteAppHTTPProbers: "false"
+    spec:
+      serviceAccountName: bank-of-anthos
+      containers:
+        - name: userservice
+          image: ghcr.io/velrite/bank-of-anthos-userservice:2821d02ca8d16770111a17a5284211fdcab41434
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: environment-config
+            - configMapRef:
+                name: accounts-db-config
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+  strategy:
+    canary:
+      steps:
+        - setWeight: 25
+          pause: {duration: 30}
+        - setWeight: 50
+          pause: {duration: 30}
+        - setWeight: 100
